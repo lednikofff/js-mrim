@@ -4,23 +4,22 @@ const Redirector = require('./network/Redirector');
 const PacketBuilder = require('./protocol/PacketBuilder');
 const PacketParser = require('./protocol/PacketParser');
 const constants = require('./protocol/constants');
-
 class MrimClient extends EventEmitter {
   constructor(options = {}) {
     super();
-
     this.options = {
       host: options.host || 'mrim.mail.ru',
       port: options.port || 2042,
-      userAgent: options.userAgent || 'Node.js MRIM Client',
+      userAgent: options.userAgent || 'MRA',
       pingInterval: options.pingInterval || 60000,
       connectionTimeout: options.connectionTimeout || 30000,
       autoReconnect: options.autoReconnect !== false,
       reconnectDelay: options.reconnectDelay || 5000,
       debug: options.debug || false,
+      lang: options.lang || 'ru',
+      clientDescription: options.clientDescription || 'MRA',
       ...options
     };
-
     this.connection = new MrimConnection();
     this.packetBuilder = new PacketBuilder();
     this.isAuthorized = false;
@@ -30,21 +29,18 @@ class MrimClient extends EventEmitter {
     this.credentials = null;
     this.contacts = new Map();
     this.groups = new Map();
-
+    this.contactIds = new Map();
     this.setupHandlers();
   }
-
   setupHandlers() {
     this.connection.on('connected', () => {
       this.emit('connected');
       this.sendHello();
     });
-
     this.connection.on('disconnected', () => {
       this.emit('disconnected');
       this.stopPing();
       this.isAuthorized = false;
-
       if (this.options.autoReconnect && this.credentials) {
         this.reconnectTimeout = setTimeout(() => {
           this.emit('debug', 'Attempting to reconnect...');
@@ -52,35 +48,27 @@ class MrimClient extends EventEmitter {
         }, this.options.reconnectDelay);
       }
     });
-
     this.connection.on('error', (error) => {
       this.emit('error', error);
     });
-
     this.connection.on('packet', (header, packet) => {
       this.handlePacket(header, packet);
     });
   }
-
   async connect() {
     try {
       this.emit('debug', `Getting main server from redirector: ${this.options.host}:${this.options.port}`);
-
       const mainServer = await Redirector.getMainServer(
         this.options.host, 
         this.options.port
       );
-
       this.emit('debug', `Connecting to main server: ${mainServer.host}:${mainServer.port}`);
-
       await this.connection.connect(mainServer.host, mainServer.port);
-
     } catch (error) {
       this.emit('error', error);
       throw error;
     }
   }
-
   async reconnect() {
     try {
       await this.connect();
@@ -91,95 +79,97 @@ class MrimClient extends EventEmitter {
       this.emit('error', error);
     }
   }
-
   sendHello() {
     const helloPacket = this.packetBuilder.buildHello();
     this.connection.send(helloPacket);
     this.emit('debug', 'Sent MRIM_CS_HELLO');
   }
-
   login(email, password, status = constants.STATUS_ONLINE) {
     this.credentials = { email, password, status };
-
     const loginPacket = this.packetBuilder.buildLogin2(
       email,
       password,
       status,
-      this.options.userAgent
+      this.options.userAgent,
+      this.options.lang,
+      this.options.clientDescription
     );
-
     this.connection.send(loginPacket);
     this.emit('debug', `Sent MRIM_CS_LOGIN2 for ${email}`);
   }
-
-  sendMessage(to, message) {
+  sendMessage(to, message, flags = 0) {
     if (!this.isAuthorized) {
       throw new Error('Not authorized. Please login first.');
     }
-
-    const messagePacket = this.packetBuilder.buildMessage(to, message);
+    const messagePacket = this.packetBuilder.buildMessage(to, message, flags);
     this.connection.send(messagePacket);
     this.emit('debug', `Sent message to ${to}`);
-    this.emit('messageSent', { to, message });
+    this.emit('messageSent', { to, message, flags });
   }
-
   sendMessageRecv(from, msgId) {
     const recvPacket = this.packetBuilder.buildMessageRecv(from, msgId);
     this.connection.send(recvPacket);
     this.emit('debug', `Sent delivery confirmation for message ${msgId} from ${from}`);
   }
-
+  sendAuthorizationAck(from, msgId) {
+    const authAckPacket = this.packetBuilder.buildAuthorize(from);
+    this.connection.send(authAckPacket);
+    this.emit('debug', `Sent authorization ACK for message ${msgId} from ${from}`);
+  }
   sendPing() {
     const pingPacket = this.packetBuilder.buildPing();
     this.connection.send(pingPacket);
     this.emit('debug', 'Sent MRIM_CS_PING');
   }
-
+  changeStatus(status, statusTitle = '', statusDesc = '') {
+    if (!this.isAuthorized) {
+      throw new Error('Not authorized. Please login first.');
+    }
+    const statusPacket = this.packetBuilder.buildChangeStatus(status, statusTitle, statusDesc);
+    this.connection.send(statusPacket);
+    this.emit('debug', `Changed status to ${status}`);
+  }
   handlePacket(header, packet) {
     this.emit('debug', `Received packet: 0x${header.msg.toString(16)}`);
-
+    const body = header.body;
     switch (header.msg) {
       case constants.MRIM_CS_HELLO_ACK:
-        this.handleHelloAck(header.body);
+        this.handleHelloAck(body);
         break;
-
       case constants.MRIM_CS_LOGIN_ACK:
-        this.handleLoginAck(header.body);
+        this.handleLoginAck(body);
         break;
-
       case constants.MRIM_CS_LOGIN_REJ:
-        this.handleLoginRej(header.body);
+        this.handleLoginRej(body);
         break;
-
       case constants.MRIM_CS_CONTACT_LIST2:
-        this.handleContactList(header.body);
+        this.handleContactList(body);
         break;
-
       case constants.MRIM_CS_USER_STATUS:
-        this.handleUserStatus(header.body);
+        this.handleUserStatus(body);
         break;
-
       case constants.MRIM_CS_USER_INFO:
-        this.handleUserInfo(header.body);
+        this.handleUserInfo(body);
         break;
-
       case constants.MRIM_CS_MESSAGE_ACK:
-        this.handleMessageAck(header.body);
+        this.handleMessageAck(body, header.seq);
         break;
-
       case constants.MRIM_CS_ADD_CONTACT_ACK:
-        this.handleAddContactAck(header.body);
+        this.handleAddContactAck(body);
         break;
-
       case constants.MRIM_CS_MODIFY_CONTACT_ACK:
-        this.handleModifyContactAck(header.body);
+        this.handleModifyContactAck(body);
+        break
+      case constants.MRIM_CS_ANKETA_INFO:
+        this.handleSearchResults(body);
         break;
-
+      case constants.MRIM_CS_AUTHORIZE_ACK:
+        this.handleAuthorizeAck(body);
+        break;
       default:
         this.emit('unknownPacket', header, packet);
     }
   }
-
   handleHelloAck(body) {
     const { pingPeriod } = PacketParser.parseHelloAck(body);
     this.pingPeriod = pingPeriod;
@@ -187,28 +177,25 @@ class MrimClient extends EventEmitter {
     this.emit('helloAck', { pingPeriod });
     this.emit('debug', `Received HELLO_ACK, ping period: ${pingPeriod}s`);
   }
-
   handleLoginAck(body) {
     this.isAuthorized = true;
     this.startPing();
-
     this.emit('loginAck');
     this.emit('authorized');
     this.emit('debug', 'Login successful - authorized');
   }
-
   handleLoginRej(body) {
     this.isAuthorized = false;
     this.credentials = null;
 
-    this.emit('loginRejected');
-    this.emit('debug', 'Login rejected - invalid credentials');
-  }
+    const { reason } = PacketParser.parseLoginRej(body);
 
+    this.emit('loginRejected', { reason });
+    this.emit('debug', `Login rejected: ${reason}`);
+  }
   handleContactList(body) {
     try {
       const contactListData = PacketParser.parseContactList(body);
-
       this.groups.clear();
       contactListData.groups.forEach((group, index) => {
         this.groups.set(index, {
@@ -217,27 +204,30 @@ class MrimClient extends EventEmitter {
           flags: group.flags
         });
       });
-
       this.contacts.clear();
+      this.contactIds.clear();
       contactListData.contacts.forEach(contact => {
         this.contacts.set(contact.email, {
           id: contact.email,
           email: contact.email,
           nickname: contact.nickname,
           flags: contact.flags,
-          groupIndex: contact.groupIndex,
-          authFlags: contact.authFlags,
+          groupId: contact.groupId,
+          serverFlags: contact.serverFlags,
           status: contact.status,
-          groupName: this.groups.get(contact.groupIndex)?.name || 'Unknown'
+          phones: contact.phones,
+          statusTitle: contact.statusTitle,
+          statusDesc: contact.statusDesc,
+          features: contact.features,
+          userAgent: contact.userAgent,
+          groupName: this.groups.get(contact.groupId)?.name || 'Unknown'
         });
       });
-
       const statusMap = {
         [constants.GET_CONTACTS_OK]: 'success',
         [constants.GET_CONTACTS_ERROR]: 'error', 
         [constants.GET_CONTACTS_INTERR]: 'internal_error'
       };
-
       this.emit('contactList', {
         status: contactListData.status,
         statusText: statusMap[contactListData.status] || 'unknown',
@@ -246,53 +236,89 @@ class MrimClient extends EventEmitter {
         groupMask: contactListData.groupMask,
         contactsMask: contactListData.contactsMask
       });
-
       this.emit('debug', `Received contact list: ${contactListData.contacts.length} contacts, ${contactListData.groups.length} groups, status: ${statusMap[contactListData.status]}`);
-
     } catch (error) {
       this.emit('error', new Error(`Failed to parse contact list: ${error.message}`));
     }
   }
-
   handleUserStatus(body) {
     try {
       const userStatus = PacketParser.parseUserStatus(body);
+      if (this.contacts.has(userStatus.email)) {
+        const contact = this.contacts.get(userStatus.email);
+        contact.status = userStatus.status;
+        contact.statusTitle = userStatus.statusTitle;
+        contact.statusDesc = userStatus.statusDesc;
+        contact.features = userStatus.features;
+        contact.userAgent = userStatus.userAgent;
+      }
       this.emit('userStatus', userStatus);
       this.emit('debug', `User ${userStatus.email} status changed to ${userStatus.status}`);
     } catch (error) {
       this.emit('error', new Error(`Failed to parse user status: ${error.message}`));
     }
   }
-
   handleUserInfo(body) {
     this.emit('userInfo', {});
     this.emit('debug', 'Received user info');
   }
-
-  handleMessageAck(body) {
+handleMessageAck(body, msgId) {
+  try {
+    const messageData = PacketParser.parseMessageAck(body);
+    console.log(`handleMessageAck: from=${messageData.from}, msgId=${msgId}, flags=0x${messageData.flags.toString(16)}`);
+    const shouldSendRecv = !(messageData.flags & constants.MESSAGE_FLAG_NORECV);
+    console.log(`MESSAGE_FLAG_NORECV: ${!!(messageData.flags & constants.MESSAGE_FLAG_NORECV)}`);
+    console.log(`Should send MRIM_CS_MESSAGE_RECV: ${shouldSendRecv}`);
+    if (shouldSendRecv) {
+      console.log(`Sending MRIM_CS_MESSAGE_RECV for message ${msgId} from ${messageData.from}`);
+      this.sendMessageRecv(messageData.from, msgId);
+    } else {
+      console.log(`Skipping MRIM_CS_MESSAGE_RECV - MESSAGE_FLAG_NORECV is set`);
+    }
+    if (messageData.flags & constants.MESSAGE_FLAG_AUTHORIZE) {
+      console.log(` Authorization message detected`);
+      this.handleAuthorizationRequest(messageData.from, messageData.message, msgId);
+      return;
+    }
+    this.emit('message', {
+      id: msgId,
+      from: messageData.from,
+      text: messageData.message,
+      flags: messageData.flags,
+      rtf: messageData.rtf
+    });
+  } catch (error) {
+    console.error('Error in handleMessageAck:', error);
+  }
+}
+  handleAuthorizationRequest(fromEmail, messageText = '', msgId) {
+    this.emit('debug', ` Processing authorization request from: ${fromEmail}, msgId: ${msgId}`);
     try {
-      const messageData = PacketParser.parseMessageAck(body);
-
-      this.sendMessageRecv(messageData.from, messageData.msgId);
-
-      this.emit('message', {
-        id: messageData.msgId,
-        from: messageData.from,
-        text: messageData.message,
-        flags: messageData.flags,
-        rtf: messageData.rtf
+      this.sendAuthorizationAck(fromEmail, msgId);
+      if (!this.contacts.has(fromEmail)) {
+        this.addContact(
+          fromEmail,
+          fromEmail.split('@')[0],
+          constants.MRIM_DEFAULT_GROUP_ID,
+          0,
+          ''
+        );
+      }
+      this.emit('contactAuthorized', { 
+        email: fromEmail,
+        message: messageText,
+        msgId: msgId,
+        timestamp: new Date()
       });
 
-      this.emit('debug', `Received message from ${messageData.from}: ${messageData.message}`);
+      this.emit('debug', ` Authorization processed and contact added: ${fromEmail}`);
     } catch (error) {
-      this.emit('error', new Error(`Failed to parse message: ${error.message}`));
+      this.emit('error', new Error(`Failed to process authorization: ${error.message}`));
     }
   }
-
   handleAddContactAck(body) {
     try {
       const result = PacketParser.parseAddContactAck(body);
-
       const statusMap = {
         [constants.CONTACT_OPER_SUCCESS]: 'success',
         [constants.CONTACT_OPER_ERROR]: 'error',
@@ -302,23 +328,19 @@ class MrimClient extends EventEmitter {
         [constants.CONTACT_OPER_USER_EXISTS]: 'user_exists',
         [constants.CONTACT_OPER_GROUP_LIMIT]: 'group_limit'
       };
-
       this.emit('contactAdded', {
         status: result.status,
         statusText: statusMap[result.status] || 'unknown',
         contactId: result.contactId
       });
-
       this.emit('debug', `Contact add result: ${statusMap[result.status]} (ID: ${result.contactId})`);
     } catch (error) {
       this.emit('error', new Error(`Failed to parse contact add ack: ${error.message}`));
     }
   }
-
   handleModifyContactAck(body) {
     try {
       const result = PacketParser.parseModifyContactAck(body);
-
       const statusMap = {
         [constants.CONTACT_OPER_SUCCESS]: 'success',
         [constants.CONTACT_OPER_ERROR]: 'error',
@@ -328,48 +350,75 @@ class MrimClient extends EventEmitter {
         [constants.CONTACT_OPER_USER_EXISTS]: 'user_exists',
         [constants.CONTACT_OPER_GROUP_LIMIT]: 'group_limit'
       };
-
       this.emit('contactModified', {
         status: result.status,
         statusText: statusMap[result.status] || 'unknown'
       });
-
       this.emit('debug', `Contact modify result: ${statusMap[result.status]}`);
     } catch (error) {
       this.emit('error', new Error(`Failed to parse contact modify ack: ${error.message}`));
     }
   }
+  handleSearchResults(body) {
+    try {
+      const searchData = PacketParser.parseSearchResults(body);
 
-  addContact(email, name, groupId = 0, flags = 0) {
+      const statusMap = {
+        [constants.MRIM_ANKETA_INFO_STATUS_OK]: 'success',
+        [constants.MRIM_ANKETA_INFO_STATUS_NOUSER]: 'no_users',
+        [constants.MRIM_ANKETA_INFO_STATUS_RATELIMERR]: 'rate_limit'
+      };
+      this.emit('searchResults', {
+        status: searchData.status,
+        statusText: statusMap[searchData.status] || 'unknown',
+        fields: searchData.fields,
+        users: searchData.users,
+        maxRows: searchData.maxRows,
+        serverTime: searchData.serverTime
+      });
+      this.emit('debug', `Search results: ${searchData.users.length} users found, status: ${statusMap[searchData.status]}`);
+    } catch (error) {
+      this.emit('error', new Error(`Failed to parse search results: ${error.message}`));
+    }
+  }
+  handleAuthorizeAck(body) {
+    const email = PacketParser.parseLPS(body, 0).value;
+    this.emit('authorizeAck', { email });
+    this.emit('debug', `Authorization accepted for ${email}`);
+  }
+  addContact(email, name, groupId = constants.MRIM_DEFAULT_GROUP_ID, flags = 0, phones = '') {
     if (!this.isAuthorized) {
       throw new Error('Not authorized. Please login first.');
     }
-
-    const packet = this.packetBuilder.buildAddContact(flags, groupId, email, name);
+    const packet = this.packetBuilder.buildAddContact(flags, groupId, email, name, phones);
     this.connection.send(packet);
     this.emit('debug', `Adding contact: ${email} (${name}) to group ${groupId}`);
   }
-
-  addGroup(groupName, flags = constants.CONTACT_FLAG_GROUP) {
+  addGroup(groupName) {
     if (!this.isAuthorized) {
       throw new Error('Not authorized. Please login first.');
     }
-
-    const packet = this.packetBuilder.buildAddGroup(flags, groupName);
+    const groupsCount = this.groups.size;
+    const packet = this.packetBuilder.buildAddGroup(groupName, groupsCount);
     this.connection.send(packet);
-    this.emit('debug', `Adding group: ${groupName}`);
+    this.emit('debug', `Adding group: ${groupName} (total groups: ${groupsCount})`);
   }
-
-  modifyContact(contactId, flags, groupId, email, name) {
+  modifyContact(contactId, flags, groupId, email, name, phones = '') {
     if (!this.isAuthorized) {
       throw new Error('Not authorized. Please login first.');
     }
-
-    const packet = this.packetBuilder.buildModifyContact(contactId, flags, groupId, email, name);
+    const packet = this.packetBuilder.buildModifyContact(contactId, flags, groupId, email, name, phones);
     this.connection.send(packet);
     this.emit('debug', `Modifying contact ID ${contactId}: ${email} (${name})`);
   }
-
+  modifyGroup(contactId, groupName) {
+    if (!this.isAuthorized) {
+      throw new Error('Not authorized. Please login first.');
+    }
+    const packet = this.packetBuilder.buildModifyGroup(contactId, groupName);
+    this.connection.send(packet);
+    this.emit('debug', `Modifying group ID ${contactId}: ${groupName}`);
+  }
   removeContact(contactId, email) {
     this.modifyContact(
       contactId,
@@ -380,7 +429,15 @@ class MrimClient extends EventEmitter {
     );
     this.emit('debug', `Removing contact ID ${contactId}: ${email}`);
   }
+  authorizeContact(email) {
+    if (!this.isAuthorized) {
+      throw new Error('Not authorized. Please login first.');
+    }
 
+    const packet = this.packetBuilder.buildAuthorize(email);
+    this.connection.send(packet);
+    this.emit('debug', `Sending authorization to ${email}`);
+  }
   addToInvisible(contactId, email, name) {
     this.modifyContact(
       contactId,
@@ -389,8 +446,8 @@ class MrimClient extends EventEmitter {
       email,
       name
     );
+    this.emit('debug', `Adding ${email} to invisible list`);
   }
-
   addToIgnore(contactId, email, name) {
     this.modifyContact(
       contactId,
@@ -399,44 +456,49 @@ class MrimClient extends EventEmitter {
       email,
       name
     );
+    this.emit('debug', `Adding ${email} to ignore list`);
   }
-
+  searchContacts(searchParams) {
+    if (!this.isAuthorized) {
+      throw new Error('Not authorized. Please login first.');
+    }
+    const packet = this.packetBuilder.buildSearchContact(searchParams);
+    this.connection.send(packet);
+    this.emit('debug', `Searching contacts with params: ${JSON.stringify(searchParams)}`);
+  }
   getContacts() {
     return Array.from(this.contacts.values());
   }
-
   getGroups() {
     return Array.from(this.groups.values());
   }
-
   findContactByEmail(email) {
     return this.contacts.get(email);
   }
-
   getGroupById(groupId) {
     return this.groups.get(groupId);
   }
-
   findGroupByName(name) {
     return this.getGroups().find(group => group.name === name);
   }
-
   getContactsInGroup(groupId) {
-    return this.getContacts().filter(contact => contact.groupIndex === groupId);
+    return this.getContacts().filter(contact => contact.groupId === groupId);
   }
-
   getUnauthorizedContacts() {
     return this.getContacts().filter(contact => 
-      contact.authFlags & constants.CONTACT_INTFLAG_NOT_AUTHORIZED
+      contact.serverFlags & constants.CONTACT_INTFLAG_NOT_AUTHORIZED
     );
   }
-
   getOnlineContacts() {
     return this.getContacts().filter(contact => 
       contact.status === constants.STATUS_ONLINE
     );
   }
-
+  getOfflineContacts() {
+    return this.getContacts().filter(contact => 
+      contact.status === constants.STATUS_OFFLINE
+    );
+  }
   startPing() {
     this.stopPing();
 
@@ -446,7 +508,6 @@ class MrimClient extends EventEmitter {
 
     this.emit('debug', `Started ping interval: ${this.pingPeriod}s`);
   }
-
   stopPing() {
     if (this.pingInterval) {
       clearInterval(this.pingInterval);
@@ -454,28 +515,22 @@ class MrimClient extends EventEmitter {
       this.emit('debug', 'Stopped ping interval');
     }
   }
-
   disconnect() {
     this.stopPing();
-
     if (this.reconnectTimeout) {
       clearTimeout(this.reconnectTimeout);
       this.reconnectTimeout = null;
     }
-
     this.connection.disconnect();
     this.isAuthorized = false;
     this.emit('debug', 'Disconnected from server');
   }
-
   isConnected() {
     return this.connection.isConnected;
   }
-
   isLoggedIn() {
     return this.isAuthorized;
   }
-
   getStatus() {
     return {
       connected: this.isConnected(),
@@ -490,5 +545,4 @@ class MrimClient extends EventEmitter {
     };
   }
 }
-
 module.exports = MrimClient;

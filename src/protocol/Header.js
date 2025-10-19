@@ -2,7 +2,6 @@ const { CS_MAGIC, CS_PROTO } = require('./constants');
 
 class MrimHeader {
   static SIZE = 44; 
-
   constructor() {
     this.magic = CS_MAGIC;
     this.proto = CS_PROTO;
@@ -13,10 +12,8 @@ class MrimHeader {
     this.fromPort = 0;
     this.reserved = Buffer.alloc(16);
   }
-
   static build(seq, msg, dlen = 0, fromHost = 0, fromPort = 0) {
     const buffer = Buffer.alloc(MrimHeader.SIZE);
-
     buffer.writeUInt32LE(CS_MAGIC, 0);
     buffer.writeUInt32LE(CS_PROTO, 4);
     buffer.writeUInt32LE(seq, 8);
@@ -25,15 +22,12 @@ class MrimHeader {
     buffer.writeUInt32LE(fromHost, 20);
     buffer.writeUInt32LE(fromPort, 24);
     buffer.fill(0, 28, 44); 
-
     return buffer;
   }
-
   static parse(buffer) {
     if (buffer.length < MrimHeader.SIZE) {
       throw new Error(`Header too small: ${buffer.length} bytes`);
     }
-
     return {
       magic: buffer.readUInt32LE(0),
       proto: buffer.readUInt32LE(4),
@@ -47,5 +41,4 @@ class MrimHeader {
     };
   }
 }
-
 module.exports = MrimHeader;
