@@ -1,6 +1,6 @@
 {
   "name": "js-mrim",
-  "version": "0.1",
+  "version": "1.0.3",
   "description": "Convenient MRIM protocol implementation for Node.js",
   "main": "src/index.js",
   "keywords": [
@@ -11,6 +11,10 @@
     "protocol"
   ],
   "author": "Vasek Lednikofff",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/lednikofff/js-mrim.git"
+  },
   "license": "MIT",
   "dependencies": {
     "iconv-lite": "^0.6.3"
